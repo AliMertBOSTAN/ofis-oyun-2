@@ -1,0 +1,15 @@
+{
+  "name": "tavla",
+  "version": "1.0.0",
+  "description": "Ofis ortamı için yerel ağ üzerinden iki kişilik klasik Türk Tavlası",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node server/game.test.js"
+  },
+  "dependencies": {
+    "@babel/standalone": "^7.29.4",
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}

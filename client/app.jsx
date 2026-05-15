@@ -1,0 +1,649 @@
+/* Tavla istemcisi - React + WebSocket
+   Dinamik tahta boyutu, ust uste binmeyen pul yerlesimi. */
+
+const { useState, useEffect, useRef, useLayoutEffect, useCallback } = React;
+
+// === WebSocket baglantisi ===
+function useGameSocket() {
+  const [wsState, setWsState] = useState({ connected: false, ws: null });
+  const [error, setError] = useState(null);
+  const [serverMsg, setServerMsg] = useState(null);
+  const wsRef = useRef(null);
+
+  function connect() {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return wsRef.current;
+    const url = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host;
+    const w = new WebSocket(url);
+    wsRef.current = w;
+    w.onopen = () => setWsState({ connected: true, ws: w });
+    w.onclose = () => setWsState({ connected: false, ws: null });
+    w.onerror = () => setError('Sunucuyla baglanti hatasi');
+    w.onmessage = (ev) => {
+      try { setServerMsg({ data: JSON.parse(ev.data), ts: Date.now() }); } catch (_) {}
+    };
+    return w;
+  }
+
+  function send(obj) {
+    const w = wsRef.current;
+    if (w && w.readyState === WebSocket.OPEN) w.send(JSON.stringify(obj));
+  }
+
+  return { connect, send, wsState, error, serverMsg };
+}
+
+// === Dinamik boyut hesabi (point genisligi/yuksekligi) ===
+function useElementSize(ref) {
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    function update() {
+      const r = el.getBoundingClientRect();
+      setSize({ w: r.width, h: r.height });
+    }
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    window.addEventListener('resize', update);
+    return () => { ro.disconnect(); window.removeEventListener('resize', update); };
+  }, [ref]);
+  return size;
+}
+
+// Pul boyut/dizilim hesabi:
+//   N pul varsa stack icine sigdirilir; tasarsa ust uste binecek sekilde adim daralir.
+function computeStack(count, cellW, cellH) {
+  // Pul boyutu: hucre genisliginin %86'si, ama hucrenin yarisina sigacak sekilde sinirla
+  const padding = 4;
+  const baseSize = Math.min(cellW * 0.86, (cellH - padding * 2) * 0.95);
+  const size = Math.max(8, baseSize);
+  if (count <= 1) return { size, step: 0, visible: count, overflow: 0 };
+  // 1..N istifte, normalde tam adim = size; ama (count-1)*size > available => daralt
+  const available = cellH - padding * 2 - size;
+  const natural = size;
+  const step = Math.max(size * 0.18, Math.min(natural, available / (count - 1)));
+  // Gorunur: tum pullar; eger step cok kucukse rozet de gosterelim
+  return { size, step, visible: count, overflow: 0 };
+}
+
+// === Tek pul bileseni ===
+function Checker({ color, draggable, label, onDragStart, style, dragging }) {
+  return (
+    <div
+      className={'tavla-checker ' + (color === 'W' ? 'w' : 'b') + (draggable ? ' draggable' : '') + (dragging ? ' dragging' : '')}
+      style={style}
+      draggable={!!draggable}
+      onDragStart={(e) => {
+        if (!draggable) { e.preventDefault(); return; }
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', 'checker');
+        if (onDragStart) onDragStart();
+      }}
+    >
+      {label || ''}
+    </div>
+  );
+}
+
+function pointBgClass(idx) { return idx % 2 === 0 ? 'light' : 'dark'; }
+
+function PointCell({ pointIdx, point, isTopRow, isActive, isTarget, onDragStartChecker, onDropToPoint, cellW, cellH }) {
+  const count = point ? point.count : 0;
+  const { size, step } = computeStack(count, cellW, cellH);
+  const color = point ? point.color : null;
+
+  // Pul konumlandirma: ust sirada yukaridan asagi, alt sirada asagidan yukari
+  const checkers = [];
+  for (let i = 0; i < count; i++) {
+    const offset = 4 + i * step; // padding 4
+    const style = {
+      position: 'absolute',
+      width: size,
+      height: size,
+      left: '50%',
+      marginLeft: -size / 2,
+      fontSize: size * 0.32,
+    };
+    if (isTopRow) style.top = offset;
+    else style.bottom = offset;
+
+    const isLast = i === count - 1;
+    // Yogun stacklerde son pula sayi etiketi ekle
+    const dense = count > 5;
+    const label = dense && isLast ? String(count) : '';
+
+    checkers.push(
+      <Checker
+        key={i}
+        color={color}
+        draggable={isActive && isLast}
+        label={label}
+        style={style}
+        onDragStart={() => onDragStartChecker({ from: pointIdx })}
+      />
+    );
+  }
+
+  return (
+    <div
+      className={
+        'tavla-point ' + (isTopRow ? 'top' : 'bottom') + ' ' + pointBgClass(pointIdx) +
+        (isActive ? ' active' : '') + (isTarget ? ' target' : '')
+      }
+      onDragOver={(e) => { if (isTarget) e.preventDefault(); }}
+      onDrop={(e) => { e.preventDefault(); if (isTarget) onDropToPoint(pointIdx); }}
+    >
+      <div className="triangle"></div>
+      {checkers}
+      <div className="point-label">{pointIdx}</div>
+    </div>
+  );
+}
+
+function Die({ value, used, rolling }) {
+  const positions = {
+    1: [[1,1]],
+    2: [[0,0],[2,2]],
+    3: [[0,0],[1,1],[2,2]],
+    4: [[0,0],[0,2],[2,0],[2,2]],
+    5: [[0,0],[0,2],[1,1],[2,0],[2,2]],
+    6: [[0,0],[0,2],[1,0],[1,2],[2,0],[2,2]],
+  };
+  const cells = Array(9).fill(null);
+  if (value && positions[value]) {
+    for (const [r, c] of positions[value]) cells[r * 3 + c] = true;
+  }
+  return (
+    <div className={'dice' + (used ? ' used' : '') + (rolling ? ' rolling' : '')}>
+      {cells.map((on, i) => <div key={i} className={on ? 'dot' : ''}></div>)}
+    </div>
+  );
+}
+
+function BarHalf({ color, count, draggable, onDragStartBar, isTop, cellW, cellH }) {
+  const { size, step } = computeStack(count, cellW, cellH);
+  const items = [];
+  for (let i = 0; i < count; i++) {
+    const isLast = i === count - 1;
+    const offset = 14 + i * step;
+    const style = {
+      position: 'absolute',
+      width: size,
+      height: size,
+      left: '50%',
+      marginLeft: -size / 2,
+      fontSize: size * 0.32,
+    };
+    if (isTop) style.top = offset;
+    else style.bottom = offset;
+
+    items.push(
+      <Checker
+        key={i}
+        color={color}
+        draggable={draggable && isLast}
+        label={count > 4 && isLast ? String(count) : ''}
+        style={style}
+        onDragStart={() => onDragStartBar(color)}
+      />
+    );
+  }
+  return (
+    <div className={'bar-half ' + (isTop ? 'top' : 'bottom')}>
+      <div className="bar-count">{count > 0 ? count : ''}</div>
+      {items}
+    </div>
+  );
+}
+
+function BarSection({ state, myColor, isMyTurn, onDragStartBar, cellW, barH }) {
+  // Ust yari -> siyah bar (siyah pullar yukariya iner)
+  // Alt yari -> beyaz bar (beyaz pullar asagidan yukariya yiglar)
+  return (
+    <div className="tavla-bar">
+      <BarHalf
+        isTop
+        color="B"
+        count={state.bar.B}
+        draggable={myColor === 'B' && isMyTurn && state.bar.B > 0}
+        onDragStartBar={onDragStartBar}
+        cellW={cellW}
+        cellH={barH / 2}
+      />
+      <BarHalf
+        isTop={false}
+        color="W"
+        count={state.bar.W}
+        draggable={myColor === 'W' && isMyTurn && state.bar.W > 0}
+        onDragStartBar={onDragStartBar}
+        cellW={cellW}
+        cellH={barH / 2}
+      />
+    </div>
+  );
+}
+
+function OffTray({ state, isTargetW, isTargetB, onDropOff }) {
+  return (
+    <div className="tavla-off">
+      <div
+        className={'off-slot ' + (isTargetW ? 'target' : '')}
+        onDragOver={(e) => { if (isTargetW) e.preventDefault(); }}
+        onDrop={() => { if (isTargetW) onDropOff('W'); }}
+      >
+        <div className="off-label">Beyaz</div>
+        {Array.from({ length: Math.min(state.off.W, 15) }).map((_, i) => <div key={i} className="off-mini"></div>)}
+        <div className="off-count">{state.off.W}/15</div>
+      </div>
+      <div
+        className={'off-slot black bottom ' + (isTargetB ? 'target' : '')}
+        onDragOver={(e) => { if (isTargetB) e.preventDefault(); }}
+        onDrop={() => { if (isTargetB) onDropOff('B'); }}
+      >
+        <div className="off-count">{state.off.B}/15</div>
+        {Array.from({ length: Math.min(state.off.B, 15) }).map((_, i) => <div key={i} className="off-mini"></div>)}
+        <div className="off-label">Siyah</div>
+      </div>
+    </div>
+  );
+}
+
+const TOP_LEFT  = [13, 14, 15, 16, 17, 18];
+const TOP_RIGHT = [19, 20, 21, 22, 23, 24];
+const BOT_LEFT  = [12, 11, 10, 9, 8, 7];
+const BOT_RIGHT = [6, 5, 4, 3, 2, 1];
+
+function Board({ state, myColor, legalMoves, isMyTurn, onSubmitMove }) {
+  const boardRef = useRef(null);
+  const quadRef = useRef(null);
+  const barRef = useRef(null);
+  const quadSize = useElementSize(quadRef); // bir ceyrek bolge: 6 nokta genisligi, yarim yukseklik
+  const barSize = useElementSize(barRef);
+  const [dragSource, setDragSource] = useState(null);
+
+  // Hucre olculeri (her noktanin gercek W,H'si)
+  const cellW = quadSize.w / 6;
+  const cellH = quadSize.h;
+
+  function legalTargetsFrom(from) {
+    if (!legalMoves) return new Set();
+    const s = new Set();
+    for (const m of legalMoves) if (m.from === from) s.add(m.to);
+    return s;
+  }
+  const targets = dragSource != null ? legalTargetsFrom(dragSource) : new Set();
+
+  const sources = (() => {
+    if (!legalMoves || !isMyTurn) return new Set();
+    const s = new Set();
+    for (const m of legalMoves) s.add(m.from);
+    return s;
+  })();
+
+  function tryMove(from, to) {
+    if (!legalMoves) return;
+    const cands = legalMoves.filter(m => m.from === from && m.to === to);
+    if (cands.length === 0) { setDragSource(null); return; }
+    onSubmitMove(cands[0]);
+    setDragSource(null);
+  }
+
+  function renderQuad(arr, isTop) {
+    return arr.map((idx) => (
+      <PointCell
+        key={idx}
+        pointIdx={idx}
+        point={state.points[idx]}
+        isTopRow={isTop}
+        isActive={sources.has(idx)}
+        isTarget={targets.has(idx)}
+        cellW={cellW}
+        cellH={cellH}
+        onDragStartChecker={({ from }) => setDragSource(from)}
+        onDropToPoint={(to) => tryMove(dragSource, to)}
+      />
+    ));
+  }
+
+  return (
+    <div ref={boardRef} className="tavla-board">
+      <div ref={quadRef} className="tavla-quadrant" style={{gridColumn: 1, gridRow: 1}}>
+        {renderQuad(TOP_LEFT, true)}
+      </div>
+      <div className="tavla-quadrant" style={{gridColumn: 3, gridRow: 1}}>
+        {renderQuad(TOP_RIGHT, true)}
+      </div>
+      <div className="tavla-quadrant" style={{gridColumn: 1, gridRow: 2}}>
+        {renderQuad(BOT_LEFT, false)}
+      </div>
+      <div className="tavla-quadrant" style={{gridColumn: 3, gridRow: 2}}>
+        {renderQuad(BOT_RIGHT, false)}
+      </div>
+      <BarSection
+        state={state}
+        myColor={myColor}
+        isMyTurn={isMyTurn}
+        onDragStartBar={() => setDragSource('bar')}
+        cellW={38}
+        barH={quadSize.h * 2}
+      />
+      <OffTray
+        state={state}
+        isTargetW={targets.has('off') && myColor === 'W'}
+        isTargetB={targets.has('off') && myColor === 'B'}
+        onDropOff={(color) => tryMove(dragSource, 'off')}
+      />
+    </div>
+  );
+}
+
+function BarSectionWithMeasure({ state, myColor, isMyTurn, onDragStartBar, quadW, quadH }) {
+  // Bar genisligi sabit (38px); barH = tahta yuksekligi = 2 * quadH
+  const cellW = 38; // bar slot genisligi yaklasik
+  const barH = quadH * 2;
+  return (
+    <BarSection
+      state={state}
+      myColor={myColor}
+      isMyTurn={isMyTurn}
+      onDragStartBar={onDragStartBar}
+      cellW={cellW}
+      barH={barH}
+    />
+  );
+}
+
+// === Lobby ===
+function Lobby({ onCreate, onJoin, error, connected }) {
+  const [name, setName] = useState('');
+  const [code, setCode] = useState('');
+  const [mode, setMode] = useState(null);
+
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center gap-6 p-4">
+      <h1 className="text-5xl font-bold tracking-wider" style={{color: 'var(--text-on-board)'}}>TAVLA</h1>
+      <p className="opacity-70 text-center">Ofis ortami icin yerel ag tavla oyunu</p>
+
+      {!mode && (
+        <div className="panel flex flex-col gap-3 min-w-[320px]">
+          <button className="btn" onClick={() => setMode('create')}>Oda Olustur</button>
+          <button className="btn" onClick={() => setMode('join')}>Odaya Katil</button>
+        </div>
+      )}
+
+      {mode === 'create' && (
+        <div className="panel flex flex-col gap-3 min-w-[320px]">
+          <label className="text-sm">Adin (opsiyonel)</label>
+          <input
+            className="rounded px-3 py-2 text-black"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Beyaz oyuncu"
+          />
+          <button className="btn" disabled={!connected} onClick={() => onCreate(name || 'Beyaz')}>
+            Oda Olustur
+          </button>
+          <button className="text-sm opacity-70" onClick={() => setMode(null)}>Geri</button>
+          {!connected && <div className="text-xs opacity-60">Sunucuya baglaniliyor...</div>}
+        </div>
+      )}
+
+      {mode === 'join' && (
+        <div className="panel flex flex-col gap-3 min-w-[320px]">
+          <label className="text-sm">Oda kodu</label>
+          <input
+            className="rounded px-3 py-2 text-black text-center text-2xl tracking-widest"
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            placeholder="123456"
+            maxLength={6}
+          />
+          <label className="text-sm">Adin (opsiyonel)</label>
+          <input
+            className="rounded px-3 py-2 text-black"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Siyah oyuncu"
+          />
+          <button
+            className="btn"
+            disabled={code.length !== 6 || !connected}
+            onClick={() => onJoin(code, name || 'Siyah')}
+          >
+            Katil
+          </button>
+          <button className="text-sm opacity-70" onClick={() => setMode(null)}>Geri</button>
+        </div>
+      )}
+
+      {error && <div className="text-red-300 text-sm">{error}</div>}
+    </div>
+  );
+}
+
+function ThemeMenu({ theme, setTheme }) {
+  const themes = [
+    { id: 'classic-wood', name: 'Klasik Ahsap' },
+    { id: 'modern-minimal', name: 'Modern Minimal' },
+    { id: 'office-fun', name: 'Renkli Ofis' },
+  ];
+  return (
+    <div style={{position: 'fixed', top: 10, right: 10, zIndex: 50}}>
+      <select
+        className="rounded px-3 py-2 text-sm"
+        style={{background: 'var(--panel-bg)', color: 'var(--panel-text)', border: 'none'}}
+        value={theme}
+        onChange={(e) => {
+          setTheme(e.target.value);
+          document.body.setAttribute('data-theme', e.target.value);
+        }}
+      >
+        {themes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function TopBar({ roomCode, myColor, players }) {
+  const me = players.find(p => p.color === myColor);
+  const opp = players.find(p => p.color !== myColor);
+  return (
+    <div className="top-bar">
+      <div className="top-chip">
+        <span className="label">Oda</span>
+        <span className="code">{roomCode || '------'}</span>
+      </div>
+      <div className="top-chip">
+        <span className="label">Sen</span>
+        <span>{myColor === 'W' ? 'Beyaz' : 'Siyah'}{me?.name ? ' — ' + me.name : ''}</span>
+      </div>
+      <div className="top-chip">
+        <span className="label">Rakip</span>
+        <span>{opp?.name || '(bekleniyor)'}</span>
+      </div>
+    </div>
+  );
+}
+
+function WaitingOverlay({ roomCode, myColor }) {
+  return (
+    <div className="waiting-overlay">
+      <div className="waiting-card">
+        <div className="head">Oda Kodu</div>
+        <div className="code-big">{roomCode || '------'}</div>
+        <div className="msg-big">Bu kodu rakibine ver</div>
+        <div className="msg-small">Rakip bağlandığında oyun otomatik başlayacak.</div>
+        <div className="role-tag">Sen: <strong>{myColor === 'W' ? 'Beyaz' : 'Siyah'}</strong></div>
+        <div className="pulse">⏳</div>
+      </div>
+    </div>
+  );
+}
+
+function GameHud({ state, myColor, onRoll, onNewGame, rolling }) {
+  const isMyTurn = state.turn === myColor;
+  const phase = state.phase;
+  const turnLabel = state.turn === 'W' ? 'Beyaz' : 'Siyah';
+
+  return (
+    <div className="game-hud flex flex-col gap-3">
+      <div className="text-lg font-bold">
+        Sira: <span style={{padding: '2px 10px', borderRadius: 6, background: state.turn === 'W' ? '#f5e6d3' : '#1a1a1a', color: state.turn === 'W' ? '#1a1a1a' : '#f5e6d3'}}>{turnLabel}</span>
+      </div>
+
+      {phase === 'opening' && (
+        <div className="text-xs opacity-70">Iki oyuncu da baglandiginda acilis zari atilacak...</div>
+      )}
+
+      {phase === 'rolling' && isMyTurn && (
+        <button className="btn" onClick={onRoll}>Zar At</button>
+      )}
+      {phase === 'rolling' && !isMyTurn && (
+        <div className="text-xs opacity-70">Rakibin zar atmasi bekleniyor...</div>
+      )}
+
+      {state.dice.length > 0 && (
+        <div className="flex gap-2 flex-wrap">
+          {state.dice.map((d, i) => <Die key={i} value={d} rolling={rolling} />)}
+          {state.used.map((d, i) => <Die key={'u' + i} value={d} used />)}
+        </div>
+      )}
+
+      {phase === 'gameOver' && (
+        <div className="flex flex-col gap-2">
+          <div className="text-xl font-bold">
+            {state.winner === myColor ? 'KAZANDIN!' : 'KAYBETTIN'}
+          </div>
+          <div className="text-sm">
+            {state.marsType === 'cift-mars' && 'Cift Mars (3 puan)'}
+            {state.marsType === 'mars' && 'Mars (2 puan)'}
+            {state.marsType === 'normal' && 'Normal (1 puan)'}
+          </div>
+          <button className="btn" onClick={onNewGame}>Yeni El</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Toast({ text }) { return <div className="toast">{text}</div>; }
+
+function Game({ state, myColor, roomCode, players, onRoll, onMove, onNewGame, legalMoves }) {
+  const [rolling, setRolling] = useState(false);
+  const lastDiceKey = useRef('');
+
+  useEffect(() => {
+    const key = (state?.dice || []).join(',') + '|' + (state?.turn || '');
+    if (key !== lastDiceKey.current && state?.dice?.length > 0) {
+      setRolling(true);
+      const t = setTimeout(() => setRolling(false), 600);
+      lastDiceKey.current = key;
+      return () => clearTimeout(t);
+    }
+  }, [state?.dice, state?.turn]);
+
+  if (!state) {
+    return (
+      <div className="game-page">
+        <TopBar roomCode={roomCode} myColor={myColor} players={players} />
+        <WaitingOverlay roomCode={roomCode} myColor={myColor} />
+      </div>
+    );
+  }
+  const isMyTurn = state.turn === myColor;
+  const waiting = (players?.length || 0) < 2 || state.phase === 'opening';
+
+  return (
+    <div className="game-page">
+      <Board
+        state={state}
+        myColor={myColor}
+        legalMoves={isMyTurn ? legalMoves : []}
+        isMyTurn={isMyTurn}
+        onSubmitMove={onMove}
+      />
+      <TopBar roomCode={roomCode} myColor={myColor} players={players} />
+      {!waiting && (
+        <GameHud
+          state={state}
+          myColor={myColor}
+          onRoll={onRoll}
+          onNewGame={onNewGame}
+          rolling={rolling}
+        />
+      )}
+      {waiting && <WaitingOverlay roomCode={roomCode} myColor={myColor} />}
+    </div>
+  );
+}
+
+// === Ana Uygulama ===
+function App() {
+  const [theme, setTheme] = useState('classic-wood');
+  const { connect, send, wsState, error: socketError, serverMsg } = useGameSocket();
+  const [screen, setScreen] = useState('lobby');
+  const [state, setState] = useState(null);
+  const [myColor, setMyColor] = useState(null);
+  const [roomCode, setRoomCode] = useState(null);
+  const [players, setPlayers] = useState([]);
+  const [legalMoves, setLegalMoves] = useState([]);
+  const [errMsg, setErrMsg] = useState(null);
+
+  useEffect(() => { document.body.setAttribute('data-theme', theme); }, [theme]);
+  useEffect(() => { connect(); }, []);
+
+  useEffect(() => {
+    if (!serverMsg) return;
+    const msg = serverMsg.data;
+    if (msg.type === 'state') {
+      setState(msg.state);
+      setMyColor(msg.yourColor);
+      setRoomCode(msg.roomCode);
+      setPlayers(msg.players || []);
+      if (msg.movesForYou) setLegalMoves(msg.movesForYou);
+      else setLegalMoves([]);
+      if (screen === 'lobby') setScreen('game');
+    } else if (msg.type === 'room_created') {
+      setRoomCode(msg.roomCode);
+      setMyColor(msg.yourColor);
+    } else if (msg.type === 'room_joined') {
+      setRoomCode(msg.roomCode);
+      setMyColor(msg.yourColor);
+    } else if (msg.type === 'error') {
+      setErrMsg(msg.message);
+      setTimeout(() => setErrMsg(null), 2500);
+    } else if (msg.type === 'opponent_left') {
+      setErrMsg('Rakip ayrildi.');
+    }
+  }, [serverMsg]);
+
+  function createRoom(name) { send({ type: 'create_room', name }); }
+  function joinRoom(code, name) { send({ type: 'join_room', roomCode: code, name }); }
+  function roll() { send({ type: 'roll' }); }
+  function move(m) { send({ type: 'move', move: m }); }
+  function newGame() { send({ type: 'new_game' }); }
+
+  return (
+    <>
+      {errMsg && <Toast text={errMsg} />}
+      <ThemeMenu theme={theme} setTheme={setTheme} />
+      {screen === 'lobby' ? (
+        <Lobby onCreate={createRoom} onJoin={joinRoom} error={socketError} connected={wsState.connected} />
+      ) : (
+        <Game
+          state={state}
+          myColor={myColor}
+          roomCode={roomCode}
+          players={players}
+          onRoll={roll}
+          onMove={move}
+          onNewGame={newGame}
+          legalMoves={legalMoves}
+        />
+      )}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);

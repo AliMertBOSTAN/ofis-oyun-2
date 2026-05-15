@@ -1,0 +1,51 @@
+.type === 'state') {
+      setState(msg.state);
+      setMyColor(msg.yourColor);
+      setRoomCode(msg.roomCode);
+      setPlayers(msg.players || []);
+      if (msg.movesForYou) setLegalMoves(msg.movesForYou);
+      else setLegalMoves([]);
+      if (screen === 'lobby') setScreen('game');
+    } else if (msg.type === 'room_created') {
+      setRoomCode(msg.roomCode);
+      setMyColor(msg.yourColor);
+    } else if (msg.type === 'room_joined') {
+      setRoomCode(msg.roomCode);
+      setMyColor(msg.yourColor);
+    } else if (msg.type === 'error') {
+      setErrMsg(msg.message);
+      setTimeout(() => setErrMsg(null), 2500);
+    } else if (msg.type === 'opponent_left') {
+      setErrMsg('Rakip ayrildi.');
+    }
+  }, [serverMsg]);
+
+  function createRoom(name) { send({ type: 'create_room', name }); }
+  function joinRoom(code, name) { send({ type: 'join_room', roomCode: code, name }); }
+  function roll() { send({ type: 'roll' }); }
+  function move(m) { send({ type: 'move', move: m }); }
+  function newGame() { send({ type: 'new_game' }); }
+
+  return (
+    <>
+      {errMsg && <Toast text={errMsg} />}
+      <ThemeMenu theme={theme} setTheme={setTheme} />
+      {screen === 'lobby' ? (
+        <Lobby onCreate={createRoom} onJoin={joinRoom} error={socketError} connected={wsState.connected} />
+      ) : (
+        <Game
+          state={state}
+          myColor={myColor}
+          roomCode={roomCode}
+          players={players}
+          onRoll={roll}
+          onMove={move}
+          onNewGame={newGame}
+          legalMoves={legalMoves}
+        />
+      )}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
