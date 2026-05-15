@@ -1,1 +1,15 @@
 node_modules/
+package-lock.json
+
+# Bash sandbox isleri sirasinda kalan gecici dosyalar
+*.new
+*.full
+*.full2
+*.tail
+*.tail2
+*.clean
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
