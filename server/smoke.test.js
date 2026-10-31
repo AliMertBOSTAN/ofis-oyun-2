@@ -11,7 +11,7 @@ const PORT = 3778;
 let serverProc;
 
 function startServer() {
-  return new Promise((resolve) => {
+  return new Promise(/** @param {(v?: void) => void} resolve */ (resolve) => {
     serverProc = spawn('node', ['server/index.js'], {
       env: { ...process.env, PORT: String(PORT) },
       cwd: __dirname + '/..',

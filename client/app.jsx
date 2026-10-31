@@ -68,7 +68,7 @@ function computeStack(count, cellW, cellH) {
 }
 
 // === Tek pul bileseni ===
-function Checker({ color, draggable, label, onDragStart, style, dragging }) {
+function Checker({ color, draggable, label, onDragStart, style, dragging = false }) {
   return (
     <div
       className={'tavla-checker ' + (color === 'W' ? 'w' : 'b') + (draggable ? ' draggable' : '') + (dragging ? ' dragging' : '')}
@@ -141,7 +141,7 @@ function PointCell({ pointIdx, point, isTopRow, isActive, isTarget, onDragStartC
   );
 }
 
-function Die({ value, used, rolling }) {
+function Die({ value, used = false, rolling = false }) {
   const positions = {
     1: [[1,1]],
     2: [[0,0],[2,2]],
@@ -646,4 +646,4 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+/** @type {any} */ (ReactDOM).createRoot(document.getElementById('root')).render(<App />);
