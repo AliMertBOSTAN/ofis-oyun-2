@@ -1,3 +1,7 @@
+# Deneme Satır
+
+Deneme Satırı
+
 # Tavla
 
 Ofis ortamında iki çalışanın yerel ağ üzerinden kendi bilgisayarlarından oynayabileceği klasik **Türk Tavlası** uygulaması. Kuralları sunucu zorunlu kılar, pullar sürükle-bırak ile hareket ettirilir, üç farklı tema seçilebilir.
